@@ -25,7 +25,7 @@ def _create_jwt() -> str:
     payload = {
         "iat": now - 60,           # Allow 60s clock skew
         "exp": now + (10 * 60),    # 10 minute expiry
-        "iss": settings.github_app_id,
+        "iss": str(settings.github_app_id),
     }
     return jwt.encode(payload, settings.github_private_key, algorithm="RS256")
 
