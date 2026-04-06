@@ -1,0 +1,61 @@
+## PR Impact
+
+{% set total_changed = r.files_added|length + r.files_removed|length + r.files_modified|length %}
+**Risk: {{ r.risk_score }}/100** · {{ total_changed }} file{{ "s" if total_changed != 1 }} changed · {{ r.blast_radius_total }} in blast radius
+{%- if r.new_cycles %} · {{ r.new_cycles|length }} new cycle{{ "s" if r.new_cycles|length != 1 }}{% endif %}
+{%- if r.violations %} · {{ r.violations|length }} violation{{ "s" if r.violations|length != 1 }}{% endif %}
+
+{% if r.files_added or r.files_removed %}
+### Changes
+
+{% if r.files_added %}
+**Added** ({{ r.files_added|length }}):
+{% for f in r.files_added[:10] %}
+- `{{ f }}`
+{% endfor %}
+{% if r.files_added|length > 10 %}
+- ... and {{ r.files_added|length - 10 }} more
+{% endif %}
+
+{% endif %}
+{% if r.files_removed %}
+**Removed** ({{ r.files_removed|length }}):
+{% for f in r.files_removed[:10] %}
+- `{{ f }}`
+{% endfor %}
+{% if r.files_removed|length > 10 %}
+- ... and {{ r.files_removed|length - 10 }} more
+{% endif %}
+
+{% endif %}
+{% endif %}
+{% if r.blast_radius and r.blast_radius_total > 0 %}
+{% include "blast_radius.md.j2" %}
+{% endif %}
+{% if r.violations %}
+{% include "violations.md.j2" %}
+{% endif %}
+{% if r.new_cycles or r.resolved_cycles %}
+### Cycles
+
+{% if r.new_cycles %}
+**New** (introduced by this PR):
+{% for cycle in r.new_cycles %}
+- {{ cycle | join(" → ") }}
+{% endfor %}
+
+{% endif %}
+{% if r.resolved_cycles %}
+**Resolved** (fixed by this PR):
+{% for cycle in r.resolved_cycles %}
+- ~~{{ cycle | join(" → ") }}~~
+{% endfor %}
+
+{% endif %}
+{% endif %}
+{% if not r.new_cycles and not r.resolved_cycles and not r.violations and r.blast_radius_total == 0 %}
+Minimal structural impact — looks clean.
+{% endif %}
+
+---
+<sub>{{ r.head_node_count }} files · {{ r.head_edge_count }} deps · analyzed in {{ r.analysis_time_ms }}ms · `{{ r.head_sha[:7] }}` · <a href="https://pr-impact.dev">PR Impact</a></sub>

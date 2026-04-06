@@ -1,0 +1,13 @@
+### Blast Radius
+{% for file, affected in r.blast_radius.items() %}
+{% if affected %}
+`{{ file }}` affects {{ affected|length }} downstream file{{ "s" if affected|length != 1 }}:
+{% for entry in affected[:5] %}
+  → `{{ entry.file }}` (depth {{ entry.depth }})
+{% endfor %}
+{% if affected|length > 5 %}
+  → ... and {{ affected|length - 5 }} more
+{% endif %}
+
+{% endif %}
+{% endfor %}

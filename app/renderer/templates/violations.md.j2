@@ -1,0 +1,5 @@
+### Architectural Violations
+{% for v in r.violations %}
+- `{{ v.source }}` imports `{{ v.target }}`
+  → {{ v.message }}
+{% endfor %}
