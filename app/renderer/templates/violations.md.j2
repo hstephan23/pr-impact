@@ -1,5 +1,8 @@
 ### Architectural Violations
-{% for v in r.violations %}
+{% for v in r.violations[:20] %}
 - `{{ v.source }}` imports `{{ v.target }}`
   → {{ v.message }}
 {% endfor %}
+{% if r.violations|length > 20 %}
+- ... and {{ r.violations|length - 20 }} more
+{% endif %}

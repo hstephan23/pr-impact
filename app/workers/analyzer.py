@@ -12,7 +12,7 @@ from arq.connections import RedisSettings
 from app.config import settings
 from app.analysis.pipeline import analyze_pr
 from app.github.client import find_bot_comment, post_pr_comment, update_pr_comment
-from app.renderer.markdown import render_comment, render_no_changes
+from app.renderer.markdown import render_comment, render_error, render_no_changes
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +38,32 @@ async def run_analysis(ctx: dict, job: dict):
         )
         body = render_comment(result) if has_changes else render_no_changes()
 
-        # Post or update the comment
-        existing = await find_bot_comment(installation_id, repo, pr)
-        if existing:
-            await update_pr_comment(installation_id, repo, existing, body)
-            logger.info("Updated comment on %s #%d (%dms)", repo, pr, elapsed)
-        else:
-            await post_pr_comment(installation_id, repo, pr, body)
-            logger.info("Posted comment on %s #%d (%dms)", repo, pr, elapsed)
+        await _upsert_comment(installation_id, repo, pr, body)
+        logger.info("Posted/updated comment on %s #%d (%dms)", repo, pr, elapsed)
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Analysis failed for %s #%d", repo, pr)
+        # Best-effort: tell the user analysis failed. Swallow secondary
+        # errors so ARQ still sees the original failure for retry/backoff.
+        try:
+            body = render_error(str(exc), job.get("head_sha", ""))
+            await _upsert_comment(installation_id, repo, pr, body)
+        except Exception:
+            logger.exception(
+                "Failed to post error comment on %s #%d", repo, pr
+            )
         raise
+
+
+async def _upsert_comment(
+    installation_id: int, repo: str, pr: int, body: str
+) -> None:
+    """Post a new comment or update the bot's existing one."""
+    existing = await find_bot_comment(installation_id, repo, pr)
+    if existing:
+        await update_pr_comment(installation_id, repo, existing, body)
+    else:
+        await post_pr_comment(installation_id, repo, pr, body)
 
 
 class WorkerSettings:

@@ -18,6 +18,7 @@ def compute_risk_score(
     blast_radius: dict[str, list[dict]],
     violations: list[dict],
     config: dict,
+    new_cycles: list[list[str]] | None = None,
 ) -> int:
     """Compute a 0-100 risk score for the PR.
 
@@ -26,6 +27,7 @@ def compute_risk_score(
         blast_radius: Per-file downstream impact.
         violations: Architectural violations found.
         config: Repo config (thresholds, etc.).
+        new_cycles: Cycles introduced by this PR (optional).
 
     Returns:
         Integer risk score, 0 (safe) to 100 (dangerous).
@@ -74,6 +76,15 @@ def compute_risk_score(
     if churn >= 20:
         score += 20
     elif churn > 0:
-        score += min(20, churn)
+        score += churn
+
+    # --- New cycles (0-15 points) ---
+    # A fresh dependency cycle is always a meaningful signal, regardless of
+    # size. The score rises quickly for the first few cycles, then saturates.
+    n_cycles = len(new_cycles or [])
+    if n_cycles >= 3:
+        score += 15
+    elif n_cycles > 0:
+        score += 5 * n_cycles
 
     return min(100, max(0, round(score)))

@@ -50,15 +50,17 @@ _env_redis = os.environ.get("REDIS_URL")
 if _env_redis:
     settings.redis_url = _env_redis
 
-# Log the resolved Redis URL on startup (with password redacted) so we can
-# verify in deployment logs that the right value was picked up.
+
 def _redact(url: str) -> str:
+    """Redact credentials from a Redis URL for safe logging."""
     if "@" in url and "://" in url:
         scheme, rest = url.split("://", 1)
         if "@" in rest:
-            creds, host = rest.rsplit("@", 1)
+            _, host = rest.rsplit("@", 1)
             return f"{scheme}://***@{host}"
     return url
 
-print(f"[config] REDIS_URL resolved to: {_redact(settings.redis_url)}", flush=True)
-print(f"[config] os.environ has REDIS_URL: {'REDIS_URL' in os.environ}", flush=True)
+
+# Log the resolved Redis URL at import time (with credentials redacted) so
+# operators can verify the right value was picked up in deployment logs.
+logger.info("REDIS_URL resolved to: %s", _redact(settings.redis_url))

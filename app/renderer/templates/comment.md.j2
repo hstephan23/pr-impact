@@ -35,6 +35,16 @@
 {% if r.violations %}
 {% include "violations.md.j2" %}
 {% endif %}
+{% if r.coupling_alerts %}
+### Coupling Alerts
+{% for c in r.coupling_alerts[:5] %}
+- `{{ c.dir1 }}` ⇄ `{{ c.dir2 }}` — coupling {{ "%.2f"|format(c.base_score) }} → **{{ "%.2f"|format(c.score) }}** ({{ c.cross_edges }} cross-edges)
+{% endfor %}
+{% if r.coupling_alerts|length > 5 %}
+- ... and {{ r.coupling_alerts|length - 5 }} more
+{% endif %}
+
+{% endif %}
 {% if r.new_cycles or r.resolved_cycles %}
 ### Cycles
 

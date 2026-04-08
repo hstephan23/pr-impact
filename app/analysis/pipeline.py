@@ -25,6 +25,7 @@ from app.analysis.diff import GraphDiff, diff_graphs
 from app.analysis.blast_radius import compute_blast_radius, total_affected
 from app.analysis.violations import check_violations
 from app.analysis.cycles import diff_cycles
+from app.analysis.coupling import diff_couplings
 from app.analysis.risk import compute_risk_score
 from app.analysis.config import parse_repo_config, config_to_dict
 from engine.adapter import scan_directory, to_plain_graph
@@ -54,6 +55,7 @@ class AnalysisResult:
     new_cycles: list[list[str]] = field(default_factory=list)
     resolved_cycles: list[list[str]] = field(default_factory=list)
     violations: list[dict] = field(default_factory=list)
+    coupling_alerts: list[dict] = field(default_factory=list)
     risk_score: int = 0
 
     # Graph stats
@@ -81,13 +83,15 @@ async def analyze_pr(job: dict) -> AnalysisResult:
     installation_id = job["installation_id"]
     repo = job["repo_full_name"]
     clone_url = job["clone_url"]
+    pr_number = job["pr_number"]
 
     # Load and validate repo config from head branch
     raw_config = await get_repo_config(installation_id, repo, job["head_ref"])
     config = parse_repo_config(raw_config)
     config_dict = config_to_dict(config)
 
-    # Clone both branches
+    # Clone both branches. For the head we fetch refs/pull/<N>/head, which
+    # lives in the base repo and works transparently for fork PRs.
     token = await get_clone_token(installation_id)
     auth_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
 
@@ -95,8 +99,8 @@ async def analyze_pr(job: dict) -> AnalysisResult:
     head_dir = tempfile.mkdtemp(prefix="pr-impact-head-")
 
     try:
-        _clone(auth_url, job["base_ref"], base_dir)
-        _clone(auth_url, job["head_ref"], head_dir)
+        _clone_ref(auth_url, job["base_ref"], base_dir)
+        _fetch_pr_head(auth_url, pr_number, head_dir)
 
         # Resolve analysis config from validated config
         paths = config.paths
@@ -156,17 +160,21 @@ async def analyze_pr(job: dict) -> AnalysisResult:
             base_result.cycles, head_result.cycles
         )
 
-        # --- Step 6: Determine modified files (in both graphs, edges changed) ---
+        # --- Step 6: Coupling alerts (newly-tight cross-directory coupling) ---
+        coupling_alerts = diff_couplings(
+            base_result.coupling, head_result.coupling
+        )
+
+        # --- Step 7: Determine modified files (in both graphs, edges changed) ---
         base_nodes = {n["data"]["id"] for n in base_graph["nodes"]}
         head_nodes = {n["data"]["id"] for n in head_graph["nodes"]}
         common_files = base_nodes & head_nodes
-        modified = []
-        for f in sorted(common_files):
-            if f in graph_diff.changed_files:
-                modified.append(f)
+        modified = sorted(common_files & graph_diff.changed_files)
 
-        # --- Step 7: Risk score ---
-        risk = compute_risk_score(graph_diff, blast, violations, config_dict)
+        # --- Step 8: Risk score ---
+        risk = compute_risk_score(
+            graph_diff, blast, violations, config_dict, new_cycles=new_cycles
+        )
 
         # --- Build result ---
         elapsed = int((time.monotonic() - start) * 1000)
@@ -184,6 +192,7 @@ async def analyze_pr(job: dict) -> AnalysisResult:
             new_cycles=new_cycles,
             resolved_cycles=resolved_cycles,
             violations=violations,
+            coupling_alerts=coupling_alerts,
             risk_score=risk,
             base_node_count=base_result.node_count,
             base_edge_count=base_result.edge_count,
@@ -198,7 +207,7 @@ async def analyze_pr(job: dict) -> AnalysisResult:
         shutil.rmtree(head_dir, ignore_errors=True)
 
 
-def _clone(url: str, ref: str, dest: str):
+def _clone_ref(url: str, ref: str, dest: str):
     """Shallow-clone a single branch into dest."""
     try:
         subprocess.run(
@@ -214,6 +223,55 @@ def _clone(url: str, ref: str, dest: str):
         logger.error(
             "Clone failed for ref=%s: %s",
             ref,
-            exc.stderr.decode(errors="replace") if exc.stderr else "unknown error",
+            _scrub(exc.stderr, url),
         )
         raise
+
+
+def _fetch_pr_head(url: str, pr_number: int, dest: str):
+    """Fetch ``refs/pull/<N>/head`` from the base repo into ``dest``.
+
+    This handles both same-repo and fork PRs uniformly because GitHub
+    mirrors every PR head under ``refs/pull/<N>/head`` on the base repo.
+    """
+    def _run(args: list[str], cwd: str | None = None):
+        subprocess.run(
+            args,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+
+    try:
+        _run(["git", "init", "--quiet", dest])
+        _run(["git", "-C", dest, "remote", "add", "origin", url])
+        _run([
+            "git", "-C", dest, "fetch", "--depth=1", "origin",
+            f"pull/{pr_number}/head:refs/pr-impact/head",
+        ])
+        _run(["git", "-C", dest, "checkout", "--quiet", "refs/pr-impact/head"])
+    except subprocess.TimeoutExpired:
+        logger.error("PR head fetch timed out for PR #%d dest=%s", pr_number, dest)
+        raise
+    except subprocess.CalledProcessError as exc:
+        logger.error(
+            "PR head fetch failed for PR #%d: %s",
+            pr_number,
+            _scrub(exc.stderr, url),
+        )
+        raise
+
+
+def _scrub(data: bytes | None, url: str) -> str:
+    """Decode git stderr and redact the installation token from the URL."""
+    if not data:
+        return "unknown error"
+    text = data.decode(errors="replace")
+    # Redact the "x-access-token:<token>@" segment if present
+    if "x-access-token:" in url:
+        scheme, _, rest = url.partition("://")
+        if "@" in rest:
+            _, _, host = rest.rpartition("@")
+            text = text.replace(url, f"{scheme}://***@{host}")
+    return text

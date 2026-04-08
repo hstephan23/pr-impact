@@ -8,6 +8,7 @@ This module provides a clean interface so the rest of pr-impact never
 imports from engine.graph or engine.parsers directly.
 """
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ if _ENGINE_DIR not in sys.path:
     sys.path.insert(0, _ENGINE_DIR)
 
 from engine.graph import build_graph, detect_languages  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,11 +67,22 @@ def scan_directory(
     # Resolve language flags
     lang_flags = _resolve_lang_flags(directory, language)
 
-    # If specific paths are given, use filter_dir for the first one
-    # (multi-path support can be added later by merging graphs)
+    # If specific paths are given, use filter_dir for the first one.
+    # Multi-path support would require merging graphs from each path — for
+    # now we honor the first entry and emit a warning so users can see that
+    # their other paths are being ignored.
     filter_dir = ""
-    if paths and paths[0] != ".":
-        filter_dir = paths[0]
+    if paths:
+        if paths[0] != ".":
+            filter_dir = paths[0]
+        if len(paths) > 1:
+            logger.warning(
+                "Multi-path analysis is not yet supported; using only the first "
+                "path %r and ignoring %d additional path(s): %r",
+                paths[0],
+                len(paths) - 1,
+                paths[1:],
+            )
 
     raw = build_graph(
         directory,
