@@ -87,16 +87,40 @@ async def update_pr_comment(
 async def find_bot_comment(
     installation_id: int, repo_full_name: str, pr_number: int
 ) -> Optional[int]:
-    """Find an existing PR Impact comment on the PR. Returns comment ID or None."""
+    """Find an existing PR Impact comment on the PR.
+
+    Looks for the hidden ``BOT_MARKER`` placed at the top of every rendered
+    comment (see ``app.renderer.markdown``). Paginates through the PR's
+    issue comments so busy PRs with many comments still match reliably.
+
+    Returns the comment ID, or None if no bot comment exists yet.
+    """
+    # Local import to avoid a circular dependency (renderer imports pipeline,
+    # pipeline imports from this module transitively in some flows).
+    from app.renderer.markdown import BOT_MARKER
+
     headers = await _headers(installation_id)
     url = f"{API_BASE}/repos/{repo_full_name}/issues/{pr_number}/comments"
+    page = 1
+    per_page = 100
 
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
+        while True:
+            resp = await client.get(
+                url,
+                headers=headers,
+                params={"per_page": per_page, "page": page},
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                return None
 
-    for comment in resp.json():
-        if comment.get("body", "").startswith("## PR Impact"):
-            return comment["id"]
+            for comment in batch:
+                body = comment.get("body", "") or ""
+                if BOT_MARKER in body:
+                    return comment["id"]
 
-    return None
+            if len(batch) < per_page:
+                return None
+            page += 1

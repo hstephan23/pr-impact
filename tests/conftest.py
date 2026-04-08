@@ -2,6 +2,12 @@
 
 import pytest
 
+# Webhook verification now fails closed when no secret is set. Provide a
+# deterministic secret for tests so signed requests can be validated.
+from app.config import settings  # noqa: E402
+
+settings.github_webhook_secret = "test-webhook-secret"
+
 
 @pytest.fixture
 def sample_graph():

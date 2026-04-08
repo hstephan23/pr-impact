@@ -25,10 +25,25 @@ _PR_ACTIONS = {"opened", "synchronize", "reopened"}
 
 
 def _verify_signature(payload: bytes, signature: str) -> bool:
-    """Verify the X-Hub-Signature-256 header matches the webhook secret."""
+    """Verify the X-Hub-Signature-256 header matches the webhook secret.
+
+    Fails closed: if no secret is configured, webhooks are rejected unless
+    the app is running in debug mode. This prevents accidental deployments
+    without a secret from accepting forged events.
+    """
     if not settings.github_webhook_secret:
-        logger.warning("GITHUB_WEBHOOK_SECRET not set — skipping verification")
-        return True
+        if settings.debug:
+            logger.warning(
+                "GITHUB_WEBHOOK_SECRET not set — skipping verification (debug mode)"
+            )
+            return True
+        logger.error(
+            "GITHUB_WEBHOOK_SECRET is not configured; rejecting webhook in non-debug mode"
+        )
+        return False
+
+    if not signature:
+        return False
 
     expected = "sha256=" + hmac.new(
         settings.github_webhook_secret.encode(),
@@ -60,7 +75,11 @@ async def github_webhook(
         return {"status": "ignored", "action": action}
 
     pr = payload["pull_request"]
-    installation_id = payload["installation"]["id"]
+    installation = payload.get("installation") or {}
+    installation_id = installation.get("id")
+    if installation_id is None:
+        logger.warning("pull_request event without installation id — ignoring")
+        return {"status": "ignored", "reason": "no installation"}
 
     job = {
         "installation_id": installation_id,
