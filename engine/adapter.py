@@ -8,6 +8,7 @@ This module provides a clean interface so the rest of pr-impact never
 imports from engine.graph or engine.parsers directly.
 """
 
+import fnmatch
 import logging
 import os
 import sys
@@ -48,6 +49,7 @@ def scan_directory(
     hide_system: bool = True,
     hide_isolated: bool = False,
     paths: Optional[list[str]] = None,
+    ignore_patterns: Optional[list[str]] = None,
 ) -> GraphResult:
     """Scan a directory and build its dependency graph.
 
@@ -60,6 +62,7 @@ def scan_directory(
         hide_isolated: If True, exclude files with no dependencies.
         paths: Optional list of subdirectories to restrict analysis to.
                If provided, uses filter_dir for each path and merges results.
+        ignore_patterns: Optional list of glob patterns to exclude from results.
 
     Returns:
         GraphResult with all structural data needed for analysis.
@@ -92,17 +95,58 @@ def scan_directory(
         filter_dir=filter_dir,
     )
 
+    nodes = raw.get("nodes", [])
+    edges = raw.get("edges", [])
+    cycles = raw.get("cycles", [])
+    unused = raw.get("unused_files", [])
+
+    # Apply ignore patterns — filter out nodes matching any glob pattern
+    if ignore_patterns:
+        nodes, edges, cycles, unused = _apply_ignore_patterns(
+            nodes, edges, cycles, unused, ignore_patterns
+        )
+
     return GraphResult(
-        nodes=raw.get("nodes", []),
-        edges=raw.get("edges", []),
-        cycles=raw.get("cycles", []),
-        has_cycles=raw.get("has_cycles", False),
-        unused_files=raw.get("unused_files", []),
+        nodes=nodes,
+        edges=edges,
+        cycles=cycles,
+        has_cycles=len(cycles) > 0,
+        unused_files=unused,
         coupling=raw.get("coupling", []),
-        node_count=len(raw.get("nodes", [])),
-        edge_count=len(raw.get("edges", [])),
+        node_count=len(nodes),
+        edge_count=len(edges),
         raw=raw,
     )
+
+
+def _apply_ignore_patterns(
+    nodes: list[dict],
+    edges: list[dict],
+    cycles: list[list[str]],
+    unused: list[str],
+    patterns: list[str],
+) -> tuple[list[dict], list[dict], list[list[str]], list[str]]:
+    """Remove nodes matching any ignore glob pattern, and their edges/cycles."""
+
+    def _ignored(file_id: str) -> bool:
+        return any(fnmatch.fnmatch(file_id, p) for p in patterns)
+
+    ignored_ids = {n["data"]["id"] for n in nodes if _ignored(n["data"]["id"])}
+    if not ignored_ids:
+        return nodes, edges, cycles, unused
+
+    nodes = [n for n in nodes if n["data"]["id"] not in ignored_ids]
+    edges = [
+        e for e in edges
+        if e["data"]["source"] not in ignored_ids
+        and e["data"]["target"] not in ignored_ids
+    ]
+    cycles = [
+        c for c in cycles
+        if not any(f in ignored_ids for f in c)
+    ]
+    unused = [f for f in unused if f not in ignored_ids]
+    return nodes, edges, cycles, unused
 
 
 def to_plain_graph(result: GraphResult) -> dict:

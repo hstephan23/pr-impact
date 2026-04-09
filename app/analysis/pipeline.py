@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from app.config import settings
 from app.github.client import get_clone_token, get_repo_config
+from app.analysis.cache import get_cached_graph, set_cached_graph
 from app.analysis.diff import GraphDiff, diff_graphs
 from app.analysis.blast_radius import compute_blast_radius, total_affected
 from app.analysis.violations import check_violations
@@ -84,49 +85,69 @@ async def analyze_pr(job: dict) -> AnalysisResult:
     repo = job["repo_full_name"]
     clone_url = job["clone_url"]
     pr_number = job["pr_number"]
+    base_sha = job.get("base_sha", "")
+    head_sha = job["head_sha"]
 
     # Load and validate repo config from head branch
     raw_config = await get_repo_config(installation_id, repo, job["head_ref"])
     config = parse_repo_config(raw_config)
     config_dict = config_to_dict(config)
 
+    # Resolve analysis config from validated config
+    paths = config.paths
+    language = config.language
+    layers = config.layers
+    hide_system = config.hide_system
+    hide_isolated = config.hide_isolated
+    ignore_patterns = config.ignore
+
+    # --- Step 1: Build dependency graphs (with caching) ---
+    base_result = await get_cached_graph(repo, base_sha) if base_sha else None
+    head_result = await get_cached_graph(repo, head_sha)
+
+    # Clone only the branches we actually need to build
+    need_base_clone = base_result is None
+    need_head_clone = head_result is None
+
     # Clone both branches. For the head we fetch refs/pull/<N>/head, which
     # lives in the base repo and works transparently for fork PRs.
     token = await get_clone_token(installation_id)
     auth_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
 
-    base_dir = tempfile.mkdtemp(prefix="pr-impact-base-")
-    head_dir = tempfile.mkdtemp(prefix="pr-impact-head-")
+    base_dir = tempfile.mkdtemp(prefix="pr-impact-base-") if need_base_clone else None
+    head_dir = tempfile.mkdtemp(prefix="pr-impact-head-") if need_head_clone else None
 
     try:
-        _clone_ref(auth_url, job["base_ref"], base_dir)
-        _fetch_pr_head(auth_url, pr_number, head_dir)
+        if need_base_clone:
+            _clone_ref(auth_url, job["base_ref"], base_dir)
+            logger.info("Building base graph for %s @ %s", repo, job["base_ref"])
+            base_result = scan_directory(
+                base_dir,
+                language=language,
+                hide_system=hide_system,
+                hide_isolated=hide_isolated,
+                paths=paths,
+                ignore_patterns=ignore_patterns,
+            )
+            if base_sha:
+                await set_cached_graph(repo, base_sha, base_result)
+        else:
+            logger.info("Using cached base graph for %s @ %s", repo, base_sha[:8])
 
-        # Resolve analysis config from validated config
-        paths = config.paths
-        language = config.language
-        layers = config.layers
-        hide_system = config.hide_system
-        hide_isolated = config.hide_isolated
-
-        # --- Step 1: Build dependency graphs for both branches ---
-        logger.info("Building base graph for %s @ %s", repo, job["base_ref"])
-        base_result = scan_directory(
-            base_dir,
-            language=language,
-            hide_system=hide_system,
-            hide_isolated=hide_isolated,
-            paths=paths,
-        )
-
-        logger.info("Building head graph for %s @ %s", repo, job["head_ref"])
-        head_result = scan_directory(
-            head_dir,
-            language=language,
-            hide_system=hide_system,
-            hide_isolated=hide_isolated,
-            paths=paths,
-        )
+        if need_head_clone:
+            _fetch_pr_head(auth_url, pr_number, head_dir)
+            logger.info("Building head graph for %s @ %s", repo, job["head_ref"])
+            head_result = scan_directory(
+                head_dir,
+                language=language,
+                hide_system=hide_system,
+                hide_isolated=hide_isolated,
+                paths=paths,
+                ignore_patterns=ignore_patterns,
+            )
+            await set_cached_graph(repo, head_sha, head_result)
+        else:
+            logger.info("Using cached head graph for %s @ %s", repo, head_sha[:8])
 
         base_graph = to_plain_graph(base_result)
         head_graph = to_plain_graph(head_result)
@@ -203,8 +224,10 @@ async def analyze_pr(job: dict) -> AnalysisResult:
         )
 
     finally:
-        shutil.rmtree(base_dir, ignore_errors=True)
-        shutil.rmtree(head_dir, ignore_errors=True)
+        if base_dir:
+            shutil.rmtree(base_dir, ignore_errors=True)
+        if head_dir:
+            shutil.rmtree(head_dir, ignore_errors=True)
 
 
 def _clone_ref(url: str, ref: str, dest: str):

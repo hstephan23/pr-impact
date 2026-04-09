@@ -6,21 +6,36 @@ GitHub Apps authenticate in two steps:
 
 The installation token is what we use for all API calls (posting comments, cloning
 private repos, etc.). Tokens expire after 1 hour but we refresh proactively.
+
+Token cache is backed by Redis so it works across multiple worker processes.
 """
 
+import json
 import logging
 import time
 from datetime import datetime
+from typing import Optional
 
-import jwt
 import httpx
+import jwt
+import redis.asyncio as aioredis
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Cache installation tokens to avoid re-creating on every request.
-_token_cache: dict[int, tuple[str, float]] = {}  # installation_id → (token, expires_at)
+_redis: Optional[aioredis.Redis] = None
+
+TOKEN_CACHE_PREFIX = "pr-impact:token:"
+# Refresh 5 minutes before expiry
+TOKEN_REFRESH_BUFFER = 300
+
+
+async def _get_redis() -> aioredis.Redis:
+    global _redis
+    if _redis is None:
+        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    return _redis
 
 
 def _create_jwt() -> str:
@@ -35,13 +50,19 @@ def _create_jwt() -> str:
 
 
 async def get_installation_token(installation_id: int) -> str:
-    """Get a fresh installation access token, using cache when possible."""
-    cached = _token_cache.get(installation_id)
-    if cached:
-        token, expires_at = cached
-        if time.time() < expires_at - 300:  # Refresh 5 min early
-            return token
+    """Get a fresh installation access token, using Redis cache when possible."""
+    # Check Redis cache
+    try:
+        r = await _get_redis()
+        cached = await r.get(f"{TOKEN_CACHE_PREFIX}{installation_id}")
+        if cached:
+            data = json.loads(cached)
+            if time.time() < data["expires_at"] - TOKEN_REFRESH_BUFFER:
+                return data["token"]
+    except Exception:
+        logger.warning("Token cache read failed for installation %d", installation_id)
 
+    # Fetch new token from GitHub
     app_jwt = _create_jwt()
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -56,7 +77,19 @@ async def get_installation_token(installation_id: int) -> str:
 
     token = data["token"]
     expires_at = _parse_expires_at(data.get("expires_at"))
-    _token_cache[installation_id] = (token, expires_at)
+
+    # Store in Redis with TTL matching the token lifetime
+    ttl = max(int(expires_at - time.time()), 60)
+    try:
+        r = await _get_redis()
+        await r.set(
+            f"{TOKEN_CACHE_PREFIX}{installation_id}",
+            json.dumps({"token": token, "expires_at": expires_at}),
+            ex=ttl,
+        )
+    except Exception:
+        logger.warning("Token cache write failed for installation %d", installation_id)
+
     return token
 
 

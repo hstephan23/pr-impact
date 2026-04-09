@@ -86,6 +86,7 @@ async def github_webhook(
         "repo_full_name": payload["repository"]["full_name"],
         "pr_number": pr["number"],
         "base_ref": pr["base"]["ref"],
+        "base_sha": pr["base"]["sha"],
         "head_ref": pr["head"]["ref"],
         "head_sha": pr["head"]["sha"],
         "clone_url": payload["repository"]["clone_url"],
